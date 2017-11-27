@@ -1,0 +1,58 @@
+os: Visual Studio 2017
+
+# environment variables
+environment:
+  aws_access_key_id:
+    secure: IeVa1jj7bYXS9IpKngm7FYKI1AaRl5IzVNrN87F/3sg=
+  aws_secret_access_key:
+    secure: JcIGXaS/GimRpZ2TyVdVnSUvTT2hmHCp4DDhpln+x4u/l8njhWC0kHfxJ3FQFm/u
+  api_token:
+    secure: DHxkhTxK/jRV6jrgB/3uMZ/3dv77ijtnI0RdRU9kIoo=
+  aws_region: us-east-1
+  s3_bucket: com.ociweb.opendds
+
+  deploy_project: opendds
+  deploy_version: ''            # download artifacts from latest build if no version specified
+  deploy_artifact: ''           # download all artifacts if empty
+
+
+# download project artifacts
+before_test:
+  - ps: iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/deploy.ps1'))
+  - ps: Expand-Archive opendds_build.zip ..
+
+test_script:
+  - ps: |
+        cd ..\opendds\build
+        ctest -C $env:configuration --timeout 180 -j 6 | % {
+          Write-Host $_
+          if ($_ -match 'Start\s+(\d+):\s+([^ ]+)') {
+            $name = $matches[2].replace('__', ' ')
+            Add-AppveyorTest -Name $name -Framework xunit -Filename $matches[1] -OutCome Running
+          } elseif ($_ -match '\d+/\d+ Test\s+#(\d+)') {
+            $items = $_.trim() -split '\s+|\*\*\*'
+            $outcome = $items[5]
+            if ($outcome -eq 'Timeout'){
+              $outcome = 'Cancelled'
+            }
+            [float]$duration=$items[6]
+            $duration *= 1000
+            $name = $items[3].replace('__', ' ')
+            Add-AppveyorTest -Name $name -Framework xunit -Filename $matches[1] -OutCome $outcome -Duration $duration
+          }
+        }
+on_finish:
+  - ps: >
+      cd $env:APPVEYOR_BUILD_FOLDER\..\opendds\build;
+      $aws_website="http://$($env:s3_bucket).s3-website-$($env:aws_region).amazonaws.com";
+      $prefix="tests/appveyor/$($env:DEPLOY_BUILD_NUMBER)/$($env:DEPLOY_JOB_NUMBER)";
+      python ..\ctestlog2json.py --generated_url_prefix=$aws_website/$prefix --output_dir=appveyor_tests --matrix="Win-$($env:platfrom)-$($env:configuration)";
+
+      $root = Resolve-Path $env:APPVEYOR_BUILD_FOLDER\..\opendds\build\appveyor_tests;
+
+      [IO.Directory]::GetFiles($root.Path, '*.*', 'AllDirectories') | % {
+        $f = $_.Substring($root.Path.Length + 1);
+        Push-AppveyorArtifact $_ -FileName $f -DeploymentName to-publish;
+        Write-S3Object -BucketName $env:s3_bucket -File $_ -Key $prefix/$f -CannedACLName public-read;
+      }
+
